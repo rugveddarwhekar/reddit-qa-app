@@ -221,6 +221,18 @@ with st.sidebar:
     with col2:
         st.metric("Status", "Active" if st.session_state.qa_chain else "Idle")
 
+    st.markdown("---")
+    with st.expander("ℹ️ About the App", expanded=False):
+        st.caption(
+            """
+            This tool uses **RAG (Retrieval-Augmented Generation)** to analyze Reddit threads. 
+            It retrieves relevant comments from the vector store and uses **Gemini 2.5 Flash** to generate answers.
+            
+            **Built by:** Rugved Darwhekar  
+            **Powered by:** LangChain & Streamlit
+            """
+        )
+
 # --- Main Interaction Area ---
 st.title("Reddit Android Feedback Analyzer")
 st.markdown("Ask natural language questions about the gathered community feedback.")
