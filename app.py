@@ -12,9 +12,56 @@ import asyncio
 import logging
 import time
 import json
-import hashlib  
+import hashlib
 
 load_dotenv()
+
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="Reddit Android Beta Analyzer",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- Custom CSS for Premium UI ---
+st.markdown("""
+    <style>
+    .main {
+        background-color: #0e1117;
+    }
+    h1 {
+        font-family: 'Inter', sans-serif;
+        background: -webkit-linear-gradient(45deg, #4285F4, #9B72CB);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 800;
+    }
+    h2, h3 {
+        font-family: 'Inter', sans-serif;
+        color: #E0E0E0;
+    }
+    .stButton>button {
+        background: linear-gradient(90deg, #4285F4 0%, #9B72CB 100%);
+        color: white;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(66, 133, 244, 0.3);
+    }
+    .metric-card {
+        background-color: #262730;
+        padding: 1rem;
+        border-radius: 8px;
+        border: 1px solid #464855;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 # --- Configure Logging ---
 LOG_FILE = "streamlit_app.log"
@@ -23,13 +70,11 @@ logger.setLevel(logging.DEBUG)
 
 file_handler = logging.FileHandler(LOG_FILE)
 file_handler.setLevel(logging.DEBUG)
-
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(formatter)
-
 logger.addHandler(file_handler)
 
-# --- Constants and Configuration ---
+# --- Constants ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 DATA_DIR = "data"
 CHROMA_DB_DIR = "chroma_db"
@@ -58,7 +103,6 @@ def process_reddit_data(reddit_data, identifier):
         hash_object = hashlib.sha256(identifier.encode('utf-8'))
         hex_dig = hash_object.hexdigest()
         collection_name = f"reddit_{hex_dig[:56]}"
-        # --- End Hashing ---
 
         vectordb = Chroma.from_documents(
             documents,
@@ -67,7 +111,6 @@ def process_reddit_data(reddit_data, identifier):
             collection_name=collection_name,
         )
         vectordb.persist()
-        # os.remove(temp_file_path)  # Clean up the temporary file.
         return vectordb
 
     except Exception as e:
@@ -88,15 +131,18 @@ def create_qa_chain(vectordb):
             temperature=0.2,
             max_retries=6,
         )
-        template = """Use the following pieces of context to answer the question at the end. If you don't know the answer, just mention that you we do not have sufficient data for answering the question and do no try to make up an answer and mention that we may support it in the future. This is a collection of public user comments about the latest Android beta version. Users like to share the feedback in online forums and this is the data.
+        template = """You are a helpful Android Feedback Assistant. Use the following user comments to answer the question. 
+If the answer is not in the context, state that clearly.
+Context provided:
 {context}
+
 Question: {question}
 Answer:"""
         QA_CHAIN_PROMPT = PromptTemplate.from_template(template)
 
         qa_chain = RetrievalQA.from_chain_type(
             model,
-            retriever=vectordb.as_retriever(search_kwargs={"k": 2}),
+            retriever=vectordb.as_retriever(search_kwargs={"k": 5}),
             return_source_documents=True,
             chain_type_kwargs={"prompt": QA_CHAIN_PROMPT},
         )
@@ -106,90 +152,119 @@ Answer:"""
         st.error(f"Failed to create QA chain: {e}")
         return None
 
-# --- Streamlit App ---
-st.title("Reddit Android Beta Feedback Analyzer")
-
-data_source = st.selectbox("Select Data Source:", ["Flair", "Post URL", "Keywords + Time"])
-
-if data_source == "Flair":
-    selected_flair = st.selectbox("Select a Flair:", options=DEFAULT_FLAIRS + ["Other"])
-    identifier = custom_flair if (selected_flair == "Other" and (custom_flair := st.text_input("Enter Custom Flair:"))) else selected_flair
-    data_type = "flair"
-    time_filter = None
-
-elif data_source == "Post URL":
-    identifier = st.text_input("Enter Post URL:")
-    data_type = "url"
-    time_filter = None
-
-elif data_source == "Keywords + Time":
-    identifier = st.text_input("Enter Keywords (comma-separated):")
-    time_filter = st.selectbox("Select Time Filter:", options=TIME_FILTERS)
-    data_type = "keywords"
-
-else: #Default option
-    identifier = None
-    data_type = None
-    time_filter = None
-
-# Initialize session state
+# --- Session State Initialization ---
 if "qa_chain" not in st.session_state:
     st.session_state.qa_chain = None
 if "vectordb" not in st.session_state:
     st.session_state.vectordb = None
 if "gemini_request_count" not in st.session_state:
     st.session_state.gemini_request_count = 0
-if "gemini_success_count" not in st.session_state:
-    st.session_state.gemini_success_count = 0
-if "gemini_failure_count" not in st.session_state:
-    st.session_state.gemini_failure_count = 0
-if "current_identifier" not in st.session_state:
-    st.session_state.current_identifier = None
+if "last_response" not in st.session_state:
+    st.session_state.last_response = None
+if "last_question" not in st.session_state:
+    st.session_state.last_question = ""
 
-# Load data and create QA chain
-if st.button("Load Data and Initialize"):
-    if identifier:
-        if st.session_state.current_identifier != (data_type, identifier, time_filter):
-            with st.spinner("Loading and processing data..."):
+# --- Sidebar Configuration ---
+with st.sidebar:
+    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Android_robot_head.svg/260px-Android_robot_head.svg.png", width=50)
+    st.title("Configuration")
+    
+    st.subheader("Data Source")
+    data_source = st.selectbox("Select Source Type:", ["Flair", "Post URL", "Keywords + Time"])
+
+    identifier = None
+    data_type = None
+    time_filter = None
+
+    if data_source == "Flair":
+        selected_flair = st.selectbox("Choose Flair:", options=DEFAULT_FLAIRS + ["Other"])
+        if selected_flair == "Other":
+            identifier = st.text_input("Enter Custom Flair:")
+        else:
+            identifier = selected_flair
+        data_type = "flair"
+
+    elif data_source == "Post URL":
+        identifier = st.text_input("Paste Post URL:")
+        data_type = "url"
+
+    elif data_source == "Keywords + Time":
+        identifier = st.text_input("Enter Keywords (comma-sep):")
+        time_filter = st.selectbox("Time Filter:", options=TIME_FILTERS)
+        data_type = "keywords"
+
+    st.markdown("---")
+    
+    # Load Data Button
+    if st.button("🔄 Load & Process Data", use_container_width=True):
+        if identifier:
+             with st.spinner("Fetching discussions from Reddit..."):
                 reddit_data = asyncio.run(get_reddit_data(data_type, identifier, time_filter, DATA_DIR))
                 if reddit_data:
-                    st.session_state.vectordb = process_reddit_data(reddit_data, identifier)
-                    st.session_state.qa_chain = create_qa_chain(st.session_state.vectordb)
-                    st.session_state.current_identifier = (data_type, identifier, time_filter)
-                    st.success("Data loaded and initialized successfully!")
+                    st.success(f"Fetched {len(reddit_data)} threads.")
+                    with st.spinner("Embedding data into Vector Store..."):
+                        vectordb = process_reddit_data(reddit_data, identifier)
+                        st.session_state.vectordb = vectordb
+                        st.session_state.qa_chain = create_qa_chain(vectordb)
+                        st.session_state.last_response = None # Reset chat on new data
+                        st.success("✅ System Ready!")
                 else:
-                    st.error("Failed to fetch Reddit data.")
+                    st.error("No data found.")
         else:
-             st.info("Data already loaded for this input.")
+            st.warning("Please enter valid input.")
+
+    st.markdown("---")
+    st.markdown("### 📊 API Usage")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Requests", st.session_state.gemini_request_count)
+    with col2:
+        st.metric("Status", "Active" if st.session_state.qa_chain else "Idle")
+
+# --- Main Interaction Area ---
+st.title("Reddit Android Feedback Analyzer")
+st.markdown("Ask natural language questions about the gathered community feedback.")
+
+if st.session_state.qa_chain is None:
+    st.info("👈 Please configure the data source in the sidebar and click **Load & Process Data** to begin.")
+    st.stop()
+
+# Q&A Interface
+question = st.text_area("What would you like to know?", height=100, placeholder="e.g., Is the battery life better in this beta?")
+
+col_ask, col_clear = st.columns([1, 5])
+with col_ask:
+    ask_button = st.button("✨ Ask Gemini", type="primary")
+
+# Logic to prevent accidental calls:
+# Only run if button is clicked OR if we have a stored response and the question hasn't changed meaningfully (to persist view on reruns)
+if ask_button and question:
+    if question.strip() == "":
+        st.warning("Please type a question.")
     else:
-        st.warning("Please provide input for the selected data source.")
+        with st.spinner("Analyzing community sentiment..."):
+            try:
+                st.session_state.gemini_request_count += 1
+                logger.info(f"Gemini API request: {question}")
+                
+                # Invoke Chain
+                result = st.session_state.qa_chain.invoke({"query": question})
+                
+                # Store in session state
+                st.session_state.last_response = result
+                st.session_state.last_question = question
+                
+            except Exception as e:
+                st.error(f"Analysis failed: {e}")
+                logger.exception(e)
 
-# User input and Q&A
-question = st.text_input("Ask a question about Android Beta feedback:")
-show_sources = st.checkbox("Show source documents")
-
-if question and st.session_state.qa_chain:
-    with st.spinner("Generating answer..."):
-        try:
-            st.session_state.gemini_request_count += 1
-            logger.info(f"Gemini API request: {question}")
-            result = st.session_state.qa_chain.invoke({"query": question})
-            st.session_state.gemini_success_count += 1
-            st.write(result["result"])
-            logger.info(f"Gemini API response: {result['result']}")
-            if show_sources:
-                with st.expander("Source Documents"):
-                    for doc in result["source_documents"]:
-                        st.write(doc.page_content)
-        except Exception as e:
-            st.session_state.gemini_failure_count += 1
-            logger.exception(f"Error during Gemini API call: {e}")
-            st.error(f"An error occurred: {e}")
-
-elif question:
-    st.warning("Please load data and initialize the QA chain first.")
-
-# Display metrics
-st.write(f"Gemini API Requests: {st.session_state.gemini_request_count}")
-st.write(f"Successful Responses: {st.session_state.gemini_success_count}")
-st.write(f"Failed Responses: {st.session_state.gemini_failure_count}")
+# Display Result (Persisted)
+if st.session_state.last_response:
+    st.markdown("### 🤖 Insight")
+    st.markdown(f"<div style='background-color: #1E1E1E; padding: 20px; border-radius: 10px; border-left: 5px solid #4285F4;'>{st.session_state.last_response['result']}</div>", unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("📚 View Source Comments"):
+        for i, doc in enumerate(st.session_state.last_response['source_documents']):
+            st.markdown(f"**Source {i+1}:**")
+            st.info(doc.page_content)
